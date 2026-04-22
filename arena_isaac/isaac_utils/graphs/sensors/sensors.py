@@ -1,7 +1,9 @@
-
 import os
 import xml.etree.ElementTree as ET
 
+import carb
+import omni.graph.core as og
+import omni.usd
 from isaac_utils.utils.geom import Rotation, Translation
 from isaac_utils.utils.path import world_path
 
@@ -9,6 +11,7 @@ from .camera import SensorCamera, SensorCameraRGBD
 from .contact import SensorContact
 from .imu import SensorIMU
 from .lidar import SensorLidar
+from arena_isaac.services.ResetSensors import register_sensors
 
 
 class Sensors:
@@ -21,6 +24,9 @@ class Sensors:
         self.prim_path: str = prim_path
         self.robot_base_frame: str = base_frame
         self.robot_base_topic: str = base_topic
+
+        # Keep references so reset_lidars() can rebuild the OmniGraph pipeline.
+        self._lidars: list[SensorLidar] = []
 
     def parse_gazebo(self, urdf: str):
         """
@@ -62,6 +68,8 @@ class Sensors:
                         )
                         lidar.simulate(self.prim_path)
                         lidar.publish(self.robot_base_topic)
+                        # Store reference for later resets.
+                        self._lidars.append(lidar)
 
                     elif sensor_type == "imu":
                         imu = SensorIMU(
@@ -108,4 +116,61 @@ class Sensors:
 
                 except Exception as e:
                     raise
-                    pass
+
+        # Register this Sensors instance so ResetSensors service can find it
+        # by robot prim path and call reset_lidars() directly (fast path).
+        if self._lidars:
+            register_sensors(self.prim_path, self)
+            carb.log_warn(
+                f"[Sensors] Registered sensor manager for {self.prim_path} "
+                f"with {len(self._lidars)} lidar(s)"
+            )
+
+    def reset_lidars(self) -> None:
+        """
+        Destroy and rebuild the OmniGraph LidarPublisher pipeline for every
+        lidar owned by this Sensors instance.
+
+        Called by ResetSensors service after robot teleportation.  Rebuilding
+        the graph (rather than patching it in-place) guarantees that
+        IsaacCreateRenderProduct acquires a fresh prim handle with the current
+        world transform, which is the only reliable approach while the
+        simulation is paused.
+        """
+        stage = omni.usd.get_context().get_stage()
+
+        for lidar in self._lidars:
+            if lidar.prim_path is None:
+                carb.log_warn(
+                    f"[Sensors] reset_lidars: lidar {lidar.name} has no prim_path, skipping"
+                )
+                continue
+
+            graph_path = os.path.join(lidar.prim_path, "LidarPublisher")
+
+            # --- Tear down: delete the existing OmniGraph prim ---
+            graph_prim = stage.GetPrimAtPath(graph_path)
+            if graph_prim.IsValid():
+                carb.log_warn(f"[Sensors] reset_lidars: deleting graph at {graph_path}")
+                try:
+                    # The proper way to delete a graph/prim in Isaac Sim USD
+                    stage.RemovePrim(graph_path)
+                except Exception as e:
+                    carb.log_error(
+                        f"[Sensors] reset_lidars: failed to delete graph {graph_path}: {e}"
+                    )
+
+            # --- Rebuild: re-run publish() which rewires the full graph ---
+            try:
+                carb.log_warn(
+                    f"[Sensors] reset_lidars: rebuilding graph for {lidar.prim_path}"
+                )
+                lidar.publish(self.robot_base_topic)
+                carb.log_warn(
+                    f"[Sensors] reset_lidars: rebuilt graph for {lidar.prim_path} OK"
+                )
+            except Exception as e:
+                carb.log_error(
+                    f"[Sensors] reset_lidars: failed to rebuild graph "
+                    f"for {lidar.prim_path}: {e}"
+                )

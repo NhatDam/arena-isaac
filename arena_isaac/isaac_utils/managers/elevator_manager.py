@@ -128,7 +128,6 @@ class ElevatorManager:
     def odom_cb(self, msg, robot_name):
         try:
             pos = msg.pose.pose.position
-            _LOGGER.info(f"Received odom for {robot_name}: ({pos.x:.2f}, {pos.y:.2f}, {pos.z:.2f})")
             self._odom_cache[robot_name] = (pos.x, pos.y, pos.z)
         except Exception as e:
             _log_warn(f"odom_cb failed for {robot_name}: {e}")
@@ -141,8 +140,6 @@ class ElevatorManager:
         now = time.time()
         # _LOGGER.info(str(self._robots))
         cooldown_sec = 5
-        if not self._pairs:
-            _LOGGER.info("No elevator was add")
         for pair in self._pairs:
             for robot_name in self._robots:
                 robot_pose = self.get_robot_pose(robot_name)
